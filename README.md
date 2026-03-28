@@ -97,7 +97,6 @@ interval_secs = 30
 api_key = "hsk_your_api_key_here"
 ```
 
-> **Note:** The `[authz]`, `[dlp]`, and `[hitl]` sections are optional and ignored when a heartbeat is configured. All rules come from the dashboard via `GET /api/config`.
 
 ## How Roles Work
 
