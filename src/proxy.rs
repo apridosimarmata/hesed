@@ -1,12 +1,16 @@
-use crate::{audit, authz, breaker, config::Config, dlp, hitl, interceptor};
+use crate::{audit, authz, breaker, config::{self, Config}, dlp, hitl, interceptor};
 use crate::interceptor::InterceptError;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::RwLock;
 use uuid::Uuid;
 
 pub struct SidecarState {
     pub config: Config,
-    pub dlp_engine: dlp::DlpEngine,
+    // Dynamic config pulled from central — wrapped in RwLock
+    pub authz: RwLock<config::AuthzConfig>,
+    pub dlp_engine: RwLock<dlp::DlpEngine>,
+    pub hitl: RwLock<config::HitlConfig>,
     pub limiter: breaker::Limiter,
     pub audit_logger: audit::AuditLogger,
     pub http_client: reqwest::Client,
@@ -22,8 +26,16 @@ impl SidecarState {
         let api_key = config.heartbeat.as_ref().and_then(|hb| hb.api_key.clone());
         let audit_logger = audit::AuditLogger::new(&config.audit, central_url, api_key);
         let http_client = reqwest::Client::new();
+        let authz = config.authz.clone();
+        let hitl = config.hitl.clone();
         Ok(Self {
-            config, dlp_engine, limiter, audit_logger, http_client,
+            config,
+            authz: RwLock::new(authz),
+            dlp_engine: RwLock::new(dlp_engine),
+            hitl: RwLock::new(hitl),
+            limiter,
+            audit_logger,
+            http_client,
             total_requests: AtomicU64::new(0),
             blocked_requests: AtomicU64::new(0),
         })
@@ -39,7 +51,6 @@ pub async fn handle_request(state: &Arc<SidecarState>, body: &[u8]) -> Vec<u8> {
         Ok(response_bytes) => response_bytes,
         Err(err) => {
             state.blocked_requests.fetch_add(1, Ordering::Relaxed);
-            // Try to extract the request id for the JSON-RPC response
             let req_id = interceptor::parse_request(body)
                 .ok()
                 .and_then(|r| r.id);
@@ -80,44 +91,49 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - extract role and evaluate
+    // 3. AuthZ - extract role and evaluate (read from RwLock)
     let role = authz::extract_role(req.params.as_ref());
-    if !authz::evaluate(&state.config.authz, &role, &tool) {
-        state.audit_logger.log(
-            &audit::AuditEvent::new(request_id, "authz", "deny", &format!("role={} tool={}", role, tool))
-                .with_tool(&tool).with_role(&role)
-        ).await;
-        return Err(InterceptError::AuthzDenied(
-            format!("role '{}' on tool '{}'", role, tool),
-        ));
+    {
+        let authz_cfg = state.authz.read().await;
+        if !authz::evaluate(&authz_cfg, &role, &tool) {
+            state.audit_logger.log(
+                &audit::AuditEvent::new(request_id, "authz", "deny", &format!("role={} tool={}", role, tool))
+                    .with_tool(&tool).with_role(&role)
+            ).await;
+            return Err(InterceptError::AuthzDenied(
+                format!("role '{}' on tool '{}'", role, tool),
+            ));
+        }
     }
     state.audit_logger.log(
         &audit::AuditEvent::new(request_id, "authz", "allow", &format!("role={} tool={}", role, tool))
             .with_tool(&tool).with_role(&role)
     ).await;
 
-    // 4. DLP - sanitize request params
+    // 4. DLP - sanitize request params (read from RwLock)
     let mut sanitized_req = req.clone();
     if let Some(ref mut params) = sanitized_req.params {
-        let detections = state.dlp_engine.detect(&params.to_string());
+        let dlp = state.dlp_engine.read().await;
+        let detections = dlp.detect(&params.to_string());
         if !detections.is_empty() {
             state.audit_logger.log(
                 &audit::AuditEvent::new(request_id, "dlp", "redact", &format!("detected: {:?}", detections))
                     .with_tool(&tool)
             ).await;
-            state.dlp_engine.sanitize_value(params);
+            dlp.sanitize_value(params);
         }
     }
 
-    // 5. HITL - human-in-the-loop for high-risk tools
-    if hitl::requires_approval(&state.config.hitl, &tool) {
+    // 5. HITL - human-in-the-loop for high-risk tools (read from RwLock)
+    let hitl_cfg = state.hitl.read().await;
+    if hitl::requires_approval(&hitl_cfg, &tool) {
         state.audit_logger.log(
             &audit::AuditEvent::new(request_id, "hitl", "pending", &format!("awaiting approval for {}", tool))
                 .with_tool(&tool)
         ).await;
 
         let params = sanitized_req.params.as_ref().cloned().unwrap_or(serde_json::Value::Null);
-        match hitl::request_approval(&state.config.hitl, &tool, &role, &params, request_id).await {
+        match hitl::request_approval(&hitl_cfg, &tool, &role, &params, request_id).await {
             Ok(true) => {
                 state.audit_logger.log(
                     &audit::AuditEvent::new(request_id, "hitl", "approve", "human approved")
@@ -140,14 +156,16 @@ async fn pipeline(
             }
         }
     }
+    drop(hitl_cfg);
 
     // 6. Forward to upstream MCP tool server
     let upstream_body = serde_json::to_vec(&sanitized_req).unwrap_or_default();
     let mut response_bytes = forward_upstream(state, &upstream_body, request_id).await?;
 
-    // 7. DLP - sanitize response
+    // 7. DLP - sanitize response (read from RwLock)
     if let Ok(mut resp_value) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
-        state.dlp_engine.sanitize_value(&mut resp_value);
+        let dlp = state.dlp_engine.read().await;
+        dlp.sanitize_value(&mut resp_value);
         response_bytes = serde_json::to_vec(&resp_value).unwrap_or(response_bytes);
     }
 
