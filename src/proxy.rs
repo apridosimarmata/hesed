@@ -91,8 +91,21 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - extract role and evaluate (read from RwLock)
-    let role = authz::extract_role(req.params.as_ref());
+    // 3. AuthZ - resolve role (pinned config overrides agent-claimed role)
+    let claimed_role = authz::extract_role(req.params.as_ref());
+    let role = if let Some(ref pinned) = state.config.server.agent_role {
+        if claimed_role != *pinned && claimed_role != "default" {
+            state.audit_logger.log(
+                &audit::AuditEvent::new(
+                    request_id, "authz", "role_override",
+                    &format!("agent claimed '{}', pinned to '{}'", claimed_role, pinned),
+                ).with_tool(&tool).with_role(pinned)
+            ).await;
+        }
+        pinned.clone()
+    } else {
+        claimed_role
+    };
     {
         let authz_cfg = state.authz.read().await;
         if !authz::evaluate(&authz_cfg, &role, &tool) {
