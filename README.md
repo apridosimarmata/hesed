@@ -21,42 +21,94 @@ Every JSON-RPC `tools/call` request passes through a security pipeline:
 
 Non-tool-call methods (e.g. `tools/list`, `resources/read`) are passed through to upstream unmodified.
 
-## Config-Pull Architecture
+## Quick Start (Docker Compose)
 
-The sidecar pulls all security rules (roles, DLP patterns, HITL rules) from the [hesed-pro](https://github.com/apridosimarmata/hesed-pro) dashboard on every heartbeat tick. The dashboard is the single source of truth — **no static rules in `config.toml`**.
+One command to run hesed in front of your MCP server. The MCP server is only reachable through hesed — agents cannot bypass it.
 
-1. Sidecar starts with empty rules
-2. Every `interval_secs`, POSTs heartbeat to `/api/agents/heartbeat`
-3. Immediately GETs `/api/config` to fetch roles, DLP patterns, HITL rules
-4. Fetched rules replace in-memory config via `RwLock`
-5. Changes in the dashboard take effect on the next heartbeat (default: 30s)
-
-## Error Handling
-
-The pipeline uses a typed `InterceptError` enum. Each stage returns a specific error variant, which is automatically converted into a JSON-RPC error response with the correct error code:
-
-| Error | Code | When |
-|---|---|---|
-| `InvalidPayload` | -32700 | Malformed JSON-RPC request |
-| `AuthzDenied` | -32600 | Role not authorized for the requested tool |
-| `RateLimited` | -32000 | Token bucket exhausted |
-| `ApprovalDenied` | -32001 | HITL webhook rejected or failed |
-| `Upstream` | -32603 | MCP tool server unreachable or errored |
-
-Example error response:
-
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "error": {
-    "code": -32600,
-    "message": "authorization denied: role 'viewer' on tool 'db_write'"
-  }
-}
+```bash
+# 1. Edit docker-compose.yml — replace the MCP service image with yours
+# 2. Edit config.docker.toml — set your dashboard URL and API key
+# 3. Start everything
+docker compose up --build
 ```
 
-## Quick Start
+**What this does:**
+
+```
+┌─────────────────────────────────────────────┐
+│              Docker network                 │
+│                                             │
+│  Agent ──▶ hesed:8080 ──▶ mcp:3000         │
+│            (exposed)      (internal only)   │
+└─────────────────────────────────────────────┘
+```
+
+- `mcp` — your MCP tool server, bound to the internal network only (not exposed to the host)
+- `hesed` — the sidecar, listening on port 8080, forwarding to `mcp:3000`
+
+**Point your agent to the sidecar:**
+
+```bash
+# In your agent config, set the MCP server URL to hesed:
+MCP_SERVER_URL=http://localhost:8080
+```
+
+> The MCP server is intentionally not exposed externally. All traffic must flow through hesed, which enforces your security policies before forwarding to the tool server.
+
+### docker-compose.yml
+
+```yaml
+services:
+  mcp:
+    image: your-mcp-server:latest  # Replace with your image
+    networks:
+      - hesed-net
+    expose:
+      - "3000"
+    # Not published to host — only reachable via hesed
+
+  hesed:
+    build: .
+    volumes:
+      - ./config.docker.toml:/app/config.toml:ro
+    ports:
+      - "8080:8080"
+    networks:
+      - hesed-net
+    depends_on:
+      - mcp
+
+networks:
+  hesed-net:
+    driver: bridge
+```
+
+### config.docker.toml
+
+```toml
+[server]
+listen_addr = "0.0.0.0:8080"
+
+[upstream]
+url = "http://mcp:3000"   # Internal Docker DNS — MCP is not exposed
+
+[breaker]
+requests_per_second = 50
+burst_size = 100
+
+[audit]
+enabled = true
+sink = "stdout"
+
+[heartbeat]
+central_url = "https://your-hesed-dashboard.example.com"
+interval_secs = 30
+api_key = "hsk_your_api_key_here"
+```
+
+## Standalone Quick Start
+
+If you prefer running without Docker:
 
 ```bash
 # Build
@@ -68,6 +120,16 @@ cargo build --release
 # Or specify a config path
 ./target/release/hesed /path/to/config.toml
 ```
+
+## Config-Pull Architecture
+
+The sidecar pulls all security rules (roles, DLP patterns, HITL rules) from the [hesed-pro](https://github.com/apridosimarmata/hesed-pro) dashboard on every heartbeat tick. The dashboard is the single source of truth — **no static rules in `config.toml`**.
+
+1. Sidecar starts with empty rules
+2. Every `interval_secs`, POSTs heartbeat to `/api/agents/heartbeat`
+3. Immediately GETs `/api/config` to fetch roles, DLP patterns, HITL rules
+4. Fetched rules replace in-memory config via `RwLock`
+5. Changes in the dashboard take effect on the next heartbeat (default: 30s)
 
 ## Configuration
 
@@ -97,6 +159,30 @@ interval_secs = 30
 api_key = "hsk_your_api_key_here"
 ```
 
+## Error Handling
+
+The pipeline uses a typed `InterceptError` enum. Each stage returns a specific error variant, which is automatically converted into a JSON-RPC error response with the correct error code:
+
+| Error | Code | When |
+|---|---|---|
+| `InvalidPayload` | -32700 | Malformed JSON-RPC request |
+| `AuthzDenied` | -32600 | Role not authorized for the requested tool |
+| `RateLimited` | -32000 | Token bucket exhausted |
+| `ApprovalDenied` | -32001 | HITL webhook rejected or failed |
+| `Upstream` | -32603 | MCP tool server unreachable or errored |
+
+Example error response:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "error": {
+    "code": -32600,
+    "message": "authorization denied: role 'viewer' on tool 'db_write'"
+  }
+}
+```
 
 ## How Roles Work
 
@@ -112,7 +198,7 @@ When a tool is listed as high-risk (configured in the dashboard), the sidecar PO
 
 If the webhook returns `approved: false` or any error, the request is denied with `ApprovalDenied`.
 
-## Docker
+## Docker (standalone)
 
 ```bash
 docker build -t hesed .

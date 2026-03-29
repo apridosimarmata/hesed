@@ -1,0 +1,20 @@
+[server]
+listen_addr = "0.0.0.0:8080"
+
+[upstream]
+# Points to the MCP service on the internal Docker network.
+# The MCP server is NOT exposed to the host — only reachable through hesed.
+url = "http://mcp:3000"
+
+[breaker]
+requests_per_second = 50
+burst_size = 100
+
+[audit]
+enabled = true
+sink = "stdout"
+
+[heartbeat]
+central_url = "https://your-hesed-dashboard.example.com"
+interval_secs = 30
+api_key = "hsk_your_api_key_here"
