@@ -6,26 +6,26 @@ services:
     image: your-mcp-server:latest  # TODO: replace with your image
     # build: ./path/to/your/mcp-server
     networks:
-      - hesed-net
+      - poimen-net
     expose:
       - "3000"
-    # Not published to host — only reachable via hesed
+    # Not published to host — only reachable via poimen
 
-  # ── Hesed security sidecar ──
+  # ── Poimen security sidecar ──
   # All agent traffic goes through here.
-  hesed:
+  poimen:
     build: .
     volumes:
       - ./config.docker.toml:/app/config.toml:ro
     ports:
       - "8080:8080"
     networks:
-      - hesed-net
+      - poimen-net
     depends_on:
       - mcp
     environment:
-      - RUST_LOG=hesed=info
+      - RUST_LOG=poimen=info
 
 networks:
-  hesed-net:
+  poimen-net:
     driver: bridge

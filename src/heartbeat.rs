@@ -50,7 +50,7 @@ struct CentralSettings {
     burst_size: String,
 }
 
-/// Spawns a background task that sends heartbeats to the central hesed-pro server.
+/// Spawns a background task that sends heartbeats to the central poimen-pro server.
 pub fn spawn(
     state: Arc<SidecarState>,
     central_url: String,

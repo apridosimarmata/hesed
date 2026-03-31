@@ -1,6 +1,6 @@
-# Contributing to hesed
+# Contributing to poimen
 
-Thanks for your interest in contributing to hesed. This guide covers the basics to get you started.
+Thanks for your interest in contributing to poimen. This guide covers the basics to get you started.
 
 ## Getting Started
 

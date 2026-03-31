@@ -3,7 +3,7 @@ listen_addr = "0.0.0.0:8080"
 
 [upstream]
 # Points to the MCP service on the internal Docker network.
-# The MCP server is NOT exposed to the host — only reachable through hesed.
+# The MCP server is NOT exposed to the host — only reachable through poimen.
 url = "http://mcp:3000"
 
 [breaker]
@@ -15,6 +15,6 @@ enabled = true
 sink = "stdout"
 
 [heartbeat]
-central_url = "https://your-hesed-dashboard.example.com"
+central_url = "https://your-poimen-dashboard.example.com"
 interval_secs = 30
 api_key = "hsk_your_api_key_here"

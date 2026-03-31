@@ -1,11 +1,11 @@
-# hesed
+# poimen
 
 A security sidecar proxy for [MCP (Model Context Protocol)](https://modelcontextprotocol.io/) tool calls. It sits between your AI agent and MCP tool servers, enforcing authorization, data loss prevention, rate limiting, and human-in-the-loop approval — with full audit logging.
 
 ## Architecture
 
 ```
-User → Agent → [hesed: Interceptor → Breaker → AuthZ → DLP → (HITL?) → Tool] → Agent → User
+User → Agent → [poimen: Interceptor → Breaker → AuthZ → DLP → (HITL?) → Tool] → Agent → User
 ```
 
 Every JSON-RPC `tools/call` request passes through a security pipeline:
@@ -23,17 +23,17 @@ Non-tool-call methods (e.g. `tools/list`, `resources/read`) are passed through t
 
 ## Quick Start
 
-Two ways to get hesed running. Pick whichever fits your setup.
+Two ways to get poimen running. Pick whichever fits your setup.
 
 ### Option A: Docker Compose
 
-Run hesed in front of your MCP server with one command. The MCP server is only reachable through hesed — agents cannot bypass it.
+Run poimen in front of your MCP server with one command. The MCP server is only reachable through poimen — agents cannot bypass it.
 
 **1. Clone the repo:**
 
 ```bash
-git clone https://github.com/apridosimarmata/hesed
-cd hesed
+git clone https://github.com/apridosimarmata/poimen
+cd poimen
 ```
 
 **2. Edit `docker-compose.yml`** — replace the MCP service image with yours. Edit `config.docker.toml` — set your dashboard URL and API key.
@@ -46,19 +46,19 @@ docker compose up --build
 
 ```
                 ┌───────────────────────────┐
-Agent ──▶ :8080 │  hesed ──▶ mcp:3000       │
+Agent ──▶ :8080 │  poimen ──▶ mcp:3000       │
   (host)        │  (exposed)  (internal only)│
                 └───────────────────────────┘
                         Docker network
 ```
 
-**4. Point your agent to Hesed:**
+**4. Point your agent to Poimen:**
 
 ```bash
 MCP_SERVER_URL=http://localhost:8080
 ```
 
-> The MCP server is intentionally not exposed externally. All traffic must flow through hesed.
+> The MCP server is intentionally not exposed externally. All traffic must flow through poimen.
 
 ### Option B: Build from Source
 
@@ -67,8 +67,8 @@ No Docker required. Clone and build with Cargo.
 **1. Clone and build:**
 
 ```bash
-git clone https://github.com/apridosimarmata/hesed
-cd hesed && cargo build --release
+git clone https://github.com/apridosimarmata/poimen
+cd poimen && cargo build --release
 ```
 
 **2. Edit `config.toml`** — set your upstream MCP server address, dashboard URL, and API key.
@@ -76,11 +76,11 @@ cd hesed && cargo build --release
 **3. Run:**
 
 ```bash
-./target/release/hesed              # uses config.toml in current dir
-./target/release/hesed /path/to/config.toml
+./target/release/poimen              # uses config.toml in current dir
+./target/release/poimen /path/to/config.toml
 ```
 
-**4. Point your agent to Hesed:**
+**4. Point your agent to Poimen:**
 
 ```bash
 MCP_SERVER_URL=http://localhost:8080
@@ -90,7 +90,7 @@ The sidecar will start on `127.0.0.1:8080` by default and proxy requests to your
 
 ## Config-Pull Architecture
 
-The sidecar pulls all security rules (roles, DLP patterns, HITL rules) from the [hesed-pro](https://github.com/apridosimarmata/hesed-pro) dashboard on every heartbeat tick. The dashboard is the single source of truth — **no static rules in `config.toml`**.
+The sidecar pulls all security rules (roles, DLP patterns, HITL rules) from the [poimen-pro](https://github.com/apridosimarmata/poimen-pro) dashboard on every heartbeat tick. The dashboard is the single source of truth — **no static rules in `config.toml`**.
 
 1. Sidecar starts with empty rules
 2. Every `interval_secs`, POSTs heartbeat to `/api/agents/heartbeat`
@@ -153,7 +153,7 @@ Example error response:
 
 ## How Roles Work
 
-The sidecar checks the `X-Hesed-Role` header on each request. If no role header is present, it defaults to `"default"`. Roles and their allowed tools are managed in the hesed-pro dashboard.
+The sidecar checks the `X-Poimen-Role` header on each request. If no role header is present, it defaults to `"default"`. Roles and their allowed tools are managed in the poimen-pro dashboard.
 
 ## Human-in-the-Loop
 

@@ -19,9 +19,6 @@ pub struct Config {
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
     pub listen_addr: String,
-    /// Pin the agent's role — overrides whatever the agent claims in _meta.role.
-    /// If unset, the agent's self-declared role is trusted (not recommended).
-    pub agent_role: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

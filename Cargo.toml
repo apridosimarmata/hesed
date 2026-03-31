@@ -1,5 +1,5 @@
 [package]
-name = "hesed"
+name = "poimen"
 version = "0.1.0"
 edition = "2021"
 description = "Security sidecar proxy for MCP tool calls"
