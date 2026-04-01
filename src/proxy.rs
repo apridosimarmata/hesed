@@ -87,6 +87,9 @@ impl SidecarState {
             return None;
         }
 
+        /// Response from GET /api/resolve-agent-key — the backend resolves
+        /// the agent key (hak_) to its role, owning project, and allowed tools.
+        /// Project scoping is enforced server-side (403 on mismatch).
         #[derive(serde::Deserialize)]
         struct Resolution {
             role: String,
@@ -167,7 +170,7 @@ async fn pipeline(
     //    When an agent key is present, its resolved allowed_tools are the source of truth
     //    (multi-project: each key carries its own project's permissions).
     //    Without an agent key, fall back to the global config pulled via heartbeat.
-    let (role, resolved_project_id) = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
+    let role = if let Some(agent_key) = authz::extract_agent_key(req.params.as_ref()) {
         match state.resolve_agent_key(&agent_key).await {
             Some(resolution) => {
                 state.audit_logger.log(
@@ -175,6 +178,7 @@ async fn pipeline(
                         &format!("agent_key={} → role={} project={}", agent_key, resolution.role, resolution.project_id))
                         .with_tool(&tool).with_role(&resolution.role)
                 ).await;
+
                 // Evaluate against the per-key allowed_tools (project-scoped)
                 if !authz::evaluate_tools(&resolution.allowed_tools, &tool) {
                     state.audit_logger.log(
@@ -189,7 +193,7 @@ async fn pipeline(
                     &audit::AuditEvent::new(request_id, "authz", "allow", &format!("role={} tool={}", resolution.role, tool))
                         .with_tool(&tool).with_role(&resolution.role)
                 ).await;
-                (resolution.role, Some(resolution.project_id))
+                resolution.role
             }
             None => {
                 state.audit_logger.log(
@@ -221,7 +225,7 @@ async fn pipeline(
             &audit::AuditEvent::new(request_id, "authz", "allow", &format!("role={} tool={}", role, tool))
                 .with_tool(&tool).with_role(&role)
         ).await;
-        (role, None)
+        role
     };
 
     // 4. DLP - sanitize request params (read from RwLock)
@@ -290,25 +294,11 @@ async fn pipeline(
     }
     drop(hitl_cfg);
 
-    // 6. Inject resolved project_id into _meta so upstream MCP server knows the project
-    if let Some(pid) = resolved_project_id {
-        if let Some(ref mut params) = sanitized_req.params {
-            if let Some(meta) = params.get_mut("_meta") {
-                meta.as_object_mut().map(|m| m.insert("project_id".into(), serde_json::Value::String(pid)));
-            } else {
-                params.as_object_mut().map(|p| p.insert(
-                    "_meta".into(),
-                    serde_json::json!({ "project_id": pid }),
-                ));
-            }
-        }
-    }
-
-    // 7. Forward to upstream MCP tool server
+    // 6. Forward to upstream MCP tool server
     let upstream_body = serde_json::to_vec(&sanitized_req).unwrap_or_default();
     let mut response_bytes = forward_upstream(state, &upstream_body, request_id).await?;
 
-    // 8. DLP - sanitize response (read from RwLock)
+    // 7. DLP - sanitize response (read from RwLock)
     if let Ok(mut resp_value) = serde_json::from_slice::<serde_json::Value>(&response_bytes) {
         let dlp = state.dlp_engine.read().await;
         dlp.sanitize_value(&mut resp_value);
