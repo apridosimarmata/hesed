@@ -1,4 +1,4 @@
-use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, dlp, hitl, interceptor};
+use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, discovery, dlp, hitl, interceptor};
 use crate::interceptor::InterceptError;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -33,6 +33,8 @@ pub struct SidecarState {
     /// Local cache: agent_key (hak_) → resolved (role, project_id) + expiry
     agent_key_cache: Mutex<LruCache<String, CachedResolution>>,
     pub cache_high_water_logged: AtomicBool,
+    /// Tools discovered from the upstream MCP server via tools/list
+    pub discovered_tools: RwLock<Vec<discovery::ToolInfo>>,
 }
 
 impl SidecarState {
@@ -60,6 +62,7 @@ impl SidecarState {
                 NonZeroUsize::new(cache_max_entries.max(1)).unwrap(),
             )),
             cache_high_water_logged: AtomicBool::new(false),
+            discovered_tools: RwLock::new(Vec::new()),
         })
     }
 

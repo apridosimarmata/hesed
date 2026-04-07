@@ -2,6 +2,7 @@ mod audit;
 mod authz;
 mod breaker;
 mod config;
+mod discovery;
 mod dlp;
 mod heartbeat;
 mod hitl;
@@ -76,6 +77,9 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(listen = %addr, upstream = %cfg.upstream.url, mode = ?cfg.mode, "starting mcp-sidecar");
 
     let state = Arc::new(proxy::SidecarState::new(cfg.clone())?);
+
+    // Discover upstream tools on startup (best-effort, non-blocking on failure)
+    discovery::refresh(&state).await;
 
     // Start heartbeat only in dynamic mode
     if cfg.mode == config::ConfigMode::Dynamic {
