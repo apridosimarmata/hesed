@@ -60,13 +60,7 @@ async fn handle(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Init tracing
-    tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::from_default_env().add_directive("mcp_sidecar=info".parse()?))
-        .json()
-        .init();
-
-    // Load config
+    // Load config first so we know the transport mode before init'ing tracing
     let config_path = std::env::args()
         .nth(1)
         .map(PathBuf::from)
@@ -74,6 +68,20 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = config::Config::load(&config_path)?;
     let is_stdio = cfg.transport == config::TransportMode::Stdio;
+
+    // In stdio mode, stdout is the JSON-RPC channel — logs MUST go to stderr.
+    if is_stdio {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env().add_directive("poimen=info".parse()?))
+            .with_writer(std::io::stderr)
+            .json()
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(EnvFilter::from_default_env().add_directive("poimen=info".parse()?))
+            .json()
+            .init();
+    }
 
     tracing::info!(
         transport = ?cfg.transport,
