@@ -139,10 +139,91 @@ impl Default for DlpConfig {
 }
 
 impl Config {
+    /// Load config from TOML file, then apply env var overrides.
+    ///
+    /// Env vars (all optional — override TOML values when set):
+    ///   POIMEN_UPSTREAM_COMMAND  — upstream MCP server command
+    ///   POIMEN_UPSTREAM_ARGS    — space-separated args for upstream command
+    ///   POIMEN_CENTRAL_URL      — heartbeat central URL (e.g. https://poimen.io)
+    ///   POIMEN_SIDECAR_KEY      — sidecar key (hsk_) for heartbeat auth
+    ///   POIMEN_MODE             — "static" or "dynamic"
+    ///
+    /// If the config file doesn't exist, a minimal dynamic-mode default is used.
     pub fn load(path: &Path) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = if path.exists() {
+            let content = std::fs::read_to_string(path)?;
+            toml::from_str(&content)?
+        } else {
+            Config::minimal_default()
+        };
+
+        // Env var overrides
+        if let Ok(cmd) = std::env::var("POIMEN_UPSTREAM_COMMAND") {
+            config.upstream.command = cmd;
+        }
+        if let Ok(args) = std::env::var("POIMEN_UPSTREAM_ARGS") {
+            config.upstream.args = args.split_whitespace().map(String::from).collect();
+        }
+        if let Ok(url) = std::env::var("POIMEN_CENTRAL_URL") {
+            let hb = config.heartbeat.get_or_insert(HeartbeatConfig {
+                central_url: String::new(),
+                interval_secs: default_interval(),
+                api_key: None,
+            });
+            hb.central_url = url;
+        }
+        if let Ok(key) = std::env::var("POIMEN_SIDECAR_KEY") {
+            let hb = config.heartbeat.get_or_insert(HeartbeatConfig {
+                central_url: "https://poimen.io".into(),
+                interval_secs: default_interval(),
+                api_key: None,
+            });
+            hb.api_key = Some(key);
+        }
+        if let Ok(mode) = std::env::var("POIMEN_MODE") {
+            config.mode = match mode.to_lowercase().as_str() {
+                "dynamic" => ConfigMode::Dynamic,
+                _ => ConfigMode::Static,
+            };
+        }
+        // Pass through upstream env vars from POIMEN_UPSTREAM_ENV_* pattern
+        for (k, v) in std::env::vars() {
+            if let Some(name) = k.strip_prefix("POIMEN_UPSTREAM_ENV_") {
+                config.upstream.env.insert(name.to_string(), v);
+            }
+        }
+
         Ok(config)
+    }
+
+    /// Minimal config for when no TOML file exists — expects env vars to fill in the blanks.
+    fn minimal_default() -> Self {
+        Config {
+            server: ServerConfig {
+                agent_id: default_agent_id(),
+                cache_max_entries: default_cache_max_entries(),
+            },
+            upstream: UpstreamConfig {
+                command: String::new(),
+                args: Vec::new(),
+                env: std::collections::HashMap::new(),
+            },
+            mode: ConfigMode::Dynamic,
+            authz: AuthzConfig::default(),
+            dlp: DlpConfig::default(),
+            breaker: BreakerConfig {
+                requests_per_second: 50,
+                burst_size: 100,
+            },
+            hitl: HitlConfig::default(),
+            audit: AuditConfig {
+                enabled: true,
+                sink: "stdout".into(),
+                file_path: None,
+                webhook_url: None,
+            },
+            heartbeat: None,
+        }
     }
 }
 
@@ -201,9 +282,11 @@ sink = "stdout"
     }
 
     #[test]
-    fn load_missing_file() {
-        let result = Config::load(Path::new("/nonexistent/config.toml"));
-        assert!(result.is_err());
+    fn load_missing_file_returns_minimal_default() {
+        let config = Config::load(Path::new("/nonexistent/config.toml")).unwrap();
+        // Minimal default uses dynamic mode and empty upstream command
+        assert_eq!(config.mode, ConfigMode::Dynamic);
+        assert!(config.upstream.command.is_empty());
     }
 
     #[test]
