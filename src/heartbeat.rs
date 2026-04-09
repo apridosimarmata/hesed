@@ -63,7 +63,6 @@ pub fn spawn(
     state: Arc<SidecarState>,
     central_url: String,
     interval_secs: u64,
-    upstream_url: String,
     api_key: Option<String>,
 ) {
     let agent_id = format!("agent-{}", &uuid::Uuid::new_v4().to_string()[..8]);
@@ -102,7 +101,7 @@ pub fn spawn(
                 agent_id: agent_id.clone(),
                 hostname: hostname.clone(),
                 version: version.clone(),
-                upstream_url: Some(upstream_url.clone()),
+                upstream_url: None,
                 total_requests: state.total_requests.load(Ordering::Relaxed),
                 blocked_requests: state.blocked_requests.load(Ordering::Relaxed),
                 upstream_tools_count,

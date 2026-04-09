@@ -1,4 +1,4 @@
-use crate::{audit, authz, breaker, config::{self, Config, ConfigMode}, discovery, dlp, hitl, interceptor, stdio};
+use crate::{audit, authz, breaker, config, config::{Config, ConfigMode}, discovery, dlp, hitl, interceptor, stdio};
 use crate::interceptor::InterceptError;
 use lru::LruCache;
 use std::num::NonZeroUsize;
@@ -35,12 +35,15 @@ pub struct SidecarState {
     pub cache_high_water_logged: AtomicBool,
     /// Tools discovered from the upstream MCP server via tools/list
     pub discovered_tools: RwLock<Vec<discovery::ToolInfo>>,
-    /// Child MCP server process for stdio transport (None in HTTP mode)
-    pub stdio_child: Option<Arc<stdio::StdioChild>>,
+    /// Child MCP server process (stdio transport)
+    pub stdio_child: Arc<stdio::StdioChild>,
+    /// Agent API key (hak_) from AGENT_API_KEY env var — source of truth for AuthZ.
+    /// If None, all tool calls are rejected.
+    pub agent_api_key: Option<String>,
 }
 
 impl SidecarState {
-    pub fn new(config: Config) -> anyhow::Result<Self> {
+    pub fn new(config: Config, child: Arc<stdio::StdioChild>) -> anyhow::Result<Self> {
         let dlp_engine = dlp::DlpEngine::new(&config.dlp)?;
         let limiter = breaker::new_limiter(config.breaker.requests_per_second, config.breaker.burst_size)?;
         let central_url = config.heartbeat.as_ref().map(|hb| hb.central_url.clone());
@@ -65,7 +68,8 @@ impl SidecarState {
             )),
             cache_high_water_logged: AtomicBool::new(false),
             discovered_tools: RwLock::new(Vec::new()),
-            stdio_child: None,
+            stdio_child: child,
+            agent_api_key: std::env::var("AGENT_API_KEY").ok().filter(|k| !k.is_empty()),
         })
     }
 
@@ -191,67 +195,56 @@ async fn pipeline(
         return Err(InterceptError::RateLimited);
     }
 
-    // 3. AuthZ - resolve role + allowed_tools from agent key.
-    //    In stdio mode the sidecar is the trust boundary (authenticated via hsk_),
-    //    so we skip per-request agent key auth — the IDE can't inject custom metadata.
-    //    In HTTP mode, agent keys are required for every tool call.
-    let agent_key_from_req = authz::extract_agent_key(req.params.as_ref());
-    let is_stdio = state.stdio_child.is_some();
-    let role = if is_stdio && agent_key_from_req.is_none() {
-        // Stdio mode without agent key — allow through with sidecar-level auth.
-        // DLP, HITL, rate limiting, and audit still apply.
-        state.audit_logger.log(
-            &audit::AuditEvent::new(request_id, "authz", "allow",
-                &format!("stdio mode, sidecar-authenticated, tool={}", tool))
-                .with_tool(&tool).with_role("sidecar")
-        ).await;
-        "sidecar".to_string()
-    } else if let Some(agent_key) = agent_key_from_req {
-        match state.resolve_agent_key(&agent_key).await {
-            Some(resolution) => {
-                state.audit_logger.log(
-                    &audit::AuditEvent::new(request_id, "authz", "key_resolve",
-                        &format!("agent_key={} → role={} project={}", agent_key, resolution.role, resolution.project_id))
-                        .with_tool(&tool).with_role(&resolution.role)
-                ).await;
+    // 3. AuthZ — AGENT_API_KEY env var is the single source of truth.
+    //    No per-request agent key extraction, no fallback "sidecar" role.
+    let agent_key = match state.agent_api_key.as_ref() {
+        Some(k) => k.clone(),
+        None => {
+            state.audit_logger.log(
+                &audit::AuditEvent::new(request_id, "authz", "deny",
+                    "AGENT_API_KEY not set — all tool calls rejected")
+                    .with_tool(&tool)
+            ).await;
+            return Err(InterceptError::AuthzDenied(
+                "AGENT_API_KEY env var is required".into(),
+            ));
+        }
+    };
 
-                // Evaluate against the per-key allowed_tools (project-scoped)
-                if !authz::evaluate_tools(&resolution.allowed_tools, &tool) {
-                    state.audit_logger.log(
-                        &audit::AuditEvent::new(request_id, "authz", "deny", &format!("role={} tool={}", resolution.role, tool))
-                            .with_tool(&tool).with_role(&resolution.role)
-                    ).await;
-                    return Err(InterceptError::AuthzDenied(
-                        format!("role '{}' on tool '{}'", resolution.role, tool),
-                    ));
-                }
+    let role = match state.resolve_agent_key(&agent_key).await {
+        Some(resolution) => {
+            state.audit_logger.log(
+                &audit::AuditEvent::new(request_id, "authz", "key_resolve",
+                    &format!("agent_key resolved → role={} project={}", resolution.role, resolution.project_id))
+                    .with_tool(&tool).with_role(&resolution.role)
+            ).await;
+
+            // Evaluate against the per-key allowed_tools (project-scoped)
+            if !authz::evaluate_tools(&resolution.allowed_tools, &tool) {
                 state.audit_logger.log(
-                    &audit::AuditEvent::new(request_id, "authz", "allow", &format!("role={} tool={}", resolution.role, tool))
+                    &audit::AuditEvent::new(request_id, "authz", "deny", &format!("role={} tool={}", resolution.role, tool))
                         .with_tool(&tool).with_role(&resolution.role)
-                ).await;
-                resolution.role
-            }
-            None => {
-                state.audit_logger.log(
-                    &audit::AuditEvent::new(request_id, "authz", "deny",
-                        &format!("invalid agent_key={}", agent_key))
-                        .with_tool(&tool)
                 ).await;
                 return Err(InterceptError::AuthzDenied(
-                    format!("invalid agent key '{}'", agent_key),
+                    format!("role '{}' on tool '{}'", resolution.role, tool),
                 ));
             }
+            state.audit_logger.log(
+                &audit::AuditEvent::new(request_id, "authz", "allow", &format!("role={} tool={}", resolution.role, tool))
+                    .with_tool(&tool).with_role(&resolution.role)
+            ).await;
+            resolution.role
         }
-    } else {
-        // No agent key — reject. Agent keys are required for all tool calls;
-        // we cannot trust an agent-supplied role claim.
-        state.audit_logger.log(
-            &audit::AuditEvent::new(request_id, "authz", "deny", "missing agent key")
-                .with_tool(&tool)
-        ).await;
-        return Err(InterceptError::AuthzDenied(
-            "agent key (hak_) is required".into(),
-        ));
+        None => {
+            state.audit_logger.log(
+                &audit::AuditEvent::new(request_id, "authz", "deny",
+                    &format!("failed to resolve AGENT_API_KEY"))
+                    .with_tool(&tool)
+            ).await;
+            return Err(InterceptError::AuthzDenied(
+                "AGENT_API_KEY could not be resolved — check key and backend connectivity".into(),
+            ));
+        }
     };
 
     // 4. DLP - sanitize request params (read from RwLock)
@@ -287,7 +280,7 @@ async fn pipeline(
         };
 
         let approval_result = if let Some((url, key)) = central {
-            let agent_id = &state.config.server.listen_addr;
+            let agent_id = &state.config.server.agent_id;
             hitl::request_approval_central(
                 url, key, agent_id, &tool, &role, &params, request_id,
             ).await
@@ -344,27 +337,8 @@ async fn forward_upstream(
     body: &[u8],
     request_id: &str,
 ) -> Result<Vec<u8>, InterceptError> {
-    // Stdio transport: forward via child process stdin/stdout
-    if let Some(ref child) = state.stdio_child {
-        return child.request(body).await.map_err(|e| {
-            tracing::error!(request_id = %request_id, "stdio upstream error: {}", e);
-            InterceptError::Upstream(e.to_string())
-        });
-    }
-
-    // HTTP transport: forward via HTTP POST
-    let resp = state.http_client
-        .post(&state.config.upstream.url)
-        .header("content-type", "application/json")
-        .body(body.to_vec())
-        .send()
-        .await;
-
-    match resp {
-        Ok(r) => Ok(r.bytes().await.unwrap_or_default().to_vec()),
-        Err(e) => {
-            tracing::error!(request_id = %request_id, "upstream error: {}", e);
-            Err(InterceptError::Upstream(e.to_string()))
-        }
-    }
+    state.stdio_child.request(body).await.map_err(|e| {
+        tracing::error!(request_id = %request_id, "upstream error: {}", e);
+        InterceptError::Upstream(e.to_string())
+    })
 }

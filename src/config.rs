@@ -15,20 +15,6 @@ impl Default for ConfigMode {
     }
 }
 
-/// Transport mode: "http" proxies via HTTP POST, "stdio" wraps a child process.
-#[derive(Debug, Deserialize, Clone, PartialEq)]
-#[serde(rename_all = "lowercase")]
-pub enum TransportMode {
-    Http,
-    Stdio,
-}
-
-impl Default for TransportMode {
-    fn default() -> Self {
-        TransportMode::Http
-    }
-}
-
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
     pub server: ServerConfig,
@@ -36,9 +22,6 @@ pub struct Config {
     /// "static" = rules from TOML only, "dynamic" = sync from central backend
     #[serde(default)]
     pub mode: ConfigMode,
-    /// "http" = proxy via HTTP POST, "stdio" = wrap child process stdin/stdout
-    #[serde(default)]
-    pub transport: TransportMode,
     #[serde(default)]
     pub authz: AuthzConfig,
     #[serde(default)]
@@ -52,13 +35,9 @@ pub struct Config {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct ServerConfig {
-    pub listen_addr: String,
-    /// Max request body size in bytes. Default: 1 MiB (1048576).
-    #[serde(default = "default_max_request_body_bytes")]
-    pub max_request_body_bytes: u64,
-    /// Graceful shutdown timeout in seconds. Default: 30.
-    #[serde(default = "default_shutdown_timeout_secs")]
-    pub shutdown_timeout_secs: u64,
+    /// Identifier for this sidecar instance (used in HITL approval requests)
+    #[serde(default = "default_agent_id")]
+    pub agent_id: String,
     /// Max entries in the agent key cache. Default: 10000.
     #[serde(default = "default_cache_max_entries")]
     pub cache_max_entries: usize,
@@ -66,11 +45,8 @@ pub struct ServerConfig {
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct UpstreamConfig {
-    /// HTTP upstream URL (required for transport = "http")
-    #[serde(default)]
-    pub url: String,
-    /// Command to spawn as child process (required for transport = "stdio")
-    pub command: Option<String>,
+    /// Command to spawn as child MCP server process
+    pub command: String,
     /// Arguments for the child process command
     #[serde(default)]
     pub args: Vec<String>,
@@ -145,12 +121,8 @@ fn default_redact() -> String {
     "[REDACTED]".to_string()
 }
 
-fn default_max_request_body_bytes() -> u64 {
-    1048576
-}
-
-fn default_shutdown_timeout_secs() -> u64 {
-    30
+fn default_agent_id() -> String {
+    format!("sidecar-{}", &uuid::Uuid::new_v4().to_string()[..8])
 }
 
 fn default_cache_max_entries() -> usize {
@@ -182,10 +154,10 @@ mod tests {
     fn valid_toml() -> &'static str {
         r#"
 [server]
-listen_addr = "127.0.0.1:8080"
+agent_id = "test-sidecar"
 
 [upstream]
-url = "http://localhost:3000"
+command = "/usr/bin/echo"
 
 [authz]
 [[authz.roles]]
@@ -218,8 +190,8 @@ sink = "stdout"
         let mut tmp = tempfile::NamedTempFile::new().unwrap();
         write!(tmp, "{}", valid_toml()).unwrap();
         let config = Config::load(tmp.path()).unwrap();
-        assert_eq!(config.server.listen_addr, "127.0.0.1:8080");
-        assert_eq!(config.upstream.url, "http://localhost:3000");
+        assert_eq!(config.server.agent_id, "test-sidecar");
+        assert_eq!(config.upstream.command, "/usr/bin/echo");
         assert_eq!(config.authz.roles.len(), 1);
         assert_eq!(config.authz.roles[0].role, "admin");
         assert_eq!(config.dlp.redact_replacement, "[REDACTED]");

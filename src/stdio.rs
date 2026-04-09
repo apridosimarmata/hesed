@@ -20,10 +20,7 @@ pub struct StdioChild {
 impl StdioChild {
     /// Spawn the child MCP server process.
     pub fn spawn(upstream: &UpstreamConfig) -> anyhow::Result<Self> {
-        let command = upstream
-            .command
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("upstream.command is required for stdio transport"))?;
+        let command = &upstream.command;
 
         let mut cmd = tokio::process::Command::new(command);
         cmd.args(&upstream.args)
@@ -161,9 +158,7 @@ pub async fn run_stdio_loop(
 
         if is_notification {
             // Forward notification to child, no response
-            if let Some(ref child) = state.stdio_child {
-                let _ = child.notify(raw_bytes).await;
-            }
+            let _ = state.stdio_child.notify(raw_bytes).await;
             continue;
         }
 
@@ -177,31 +172,23 @@ pub async fn run_stdio_loop(
             stdout.flush().await?;
         } else {
             // Non-tool-call (initialize, tools/list, etc.) — forward to child directly
-            if let Some(ref child) = state.stdio_child {
-                match child.request(raw_bytes).await {
-                    Ok(resp) => {
-                        stdout.write_all(&resp).await?;
-                        stdout.write_all(b"\n").await?;
-                        stdout.flush().await?;
-                    }
-                    Err(e) => {
-                        let id = parsed.get("id").cloned();
-                        let err = serde_json::json!({
-                            "jsonrpc": "2.0", "id": id,
-                            "error": {"code": -32603, "message": format!("child error: {}", e)}
-                        });
-                        let b = serde_json::to_vec(&err).unwrap();
-                        stdout.write_all(&b).await?;
-                        stdout.write_all(b"\n").await?;
-                        stdout.flush().await?;
-                    }
+            match state.stdio_child.request(raw_bytes).await {
+                Ok(resp) => {
+                    stdout.write_all(&resp).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
                 }
-            } else {
-                // No child — forward via HTTP (shouldn't happen in stdio mode)
-                let response_bytes = crate::proxy::handle_request(&state, raw_bytes).await;
-                stdout.write_all(&response_bytes).await?;
-                stdout.write_all(b"\n").await?;
-                stdout.flush().await?;
+                Err(e) => {
+                    let id = parsed.get("id").cloned();
+                    let err = serde_json::json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "error": {"code": -32603, "message": format!("child error: {}", e)}
+                    });
+                    let b = serde_json::to_vec(&err).unwrap();
+                    stdout.write_all(&b).await?;
+                    stdout.write_all(b"\n").await?;
+                    stdout.flush().await?;
+                }
             }
         }
     }

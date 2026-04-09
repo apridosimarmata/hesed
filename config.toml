@@ -1,10 +1,10 @@
 mode = "dynamic"
 
 [server]
-listen_addr = "127.0.0.1:8080"
+# agent_id defaults to a random UUID if not set
 
 [upstream]
-url = "http://127.0.0.1:9003"
+command = "/path/to/your/mcp-server"
 
 # Rules (authz, dlp, hitl) are pulled from the central dashboard.
 # No static rules here — the dashboard is the single source of truth.
